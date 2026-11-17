@@ -1,7 +1,7 @@
 //! Verified-TLS callback client: submit the inspection report and fetch the CAPI
 //! bootstrap user-data and the per-host network data (contract §4.2/§4.3/§4.6/§8/§9).
 //!
-//! Five requests, all `Authorization: Bearer <token>` over TLS verified against
+//! Seven requests, all `Authorization: Bearer <token>` over TLS verified against
 //! the CA delivered on the cmdline (`beskar7.ca`):
 //!   * `POST {api}/api/v1/inspection/{ns}/{host}` — the §6 report. Success is
 //!     **202 Accepted** (the controller writes status asynchronously); the client
@@ -24,6 +24,12 @@
 //!     `{"reason":"<short deploy-step reason>"}` carrying **no secret** (never the
 //!     token, nonce, or join data); success is **202 Accepted**, same retry policy
 //!     as the inspection POST.
+//!   * `POST {api}/api/v1/cleaned/{ns}/{host}`: the cleaning-complete callback
+//!     (v4.4 §4.7), fired only after every eligible disk was wiped. Body is the
+//!     fixed advisory `{"status":"cleaned"}`.
+//!   * `POST {api}/api/v1/clean-failed/{ns}/{host}`: the cleaning-failed callback
+//!     (v4.4 §4.8), with `{"reason":"<count and first failed disk>"}`. Both accept
+//!     only the cleaning token and use the same retry policy.
 //!
 //! ## TLS posture (§8)
 //! The root store holds *only* the delivered CA — [`RootCertStore::empty`] plus
@@ -307,19 +313,7 @@ impl CallbackClient {
     /// data (§9).
     pub fn provision_failed(&self, reason: &str) -> Result<(), ClientError> {
         let body = provision_failed_body(reason)?;
-        let auth = self.bearer();
-        run_with_retries(MAX_ATTEMPTS, sleep, |_| {
-            let result = self
-                .agent
-                .post(&self.provision_failed_url)
-                .header("Authorization", &auth)
-                .header("Content-Type", "application/json")
-                .send(&body[..]);
-            match classify_status(result) {
-                Ok(_resp) => Attempt::Done(()),
-                Err(verdict) => verdict.into_attempt(),
-            }
-        })
+        self.post_json(&self.provision_failed_url, &body)
     }
 
     /// The `Authorization` header value. Built only here, at the point of use —

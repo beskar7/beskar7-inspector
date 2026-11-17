@@ -112,16 +112,20 @@ parameters on the kernel cmdline. The inspector then runs two phases:
    firmware connected before starting the Shell.
 
 **Clean mode** (`beskar7.mode=clean`, v4.4): when a released host has
-`spec.cleaningMode: Metadata`, the controller boots the inspector in clean mode
+`spec.cleaning.mode: Metadata`, the controller boots the inspector in clean mode
 instead. It brings up the network, waits for the disk list to settle, and zeroes
 the first and last 8 MiB of every eligible disk (the same eligibility as target
 selection: physical, non-removable, writable, not backing the ramdisk) and of
-every partition on it. That removes the partition table, its GPT backup,
-`COS_OEM` with the previous join secret, and filesystem/RAID/LVM signatures. It
-then `POST`s `/api/v1/cleaned` (or `/api/v1/clean-failed` if any disk failed or
-none was found) and powers off. It never inspects, fetches bootstrap data or
-writes an image. This is **not** a secure erase. The wipe only runs as PID 1;
-`--dry-run` lists what it would wipe and touches nothing.
+every partition on it. That removes the partition tables, the GPT backup, and
+filesystem/RAID/LVM signatures, so nothing old mounts, assembles or boots. This
+is **not** a secure erase: the data blocks in between, including the previous
+`COS_OEM` files and join secret, stay recoverable from the raw disk. After the
+wipe it lists the disks again. If every disk was wiped it `POST`s
+`/api/v1/cleaned` and powers off. If any disk failed, none was found, or a new
+eligible disk appeared, it `POST`s `/api/v1/clean-failed` and parks, and the
+controller holds the host until the operator acts. It never inspects, fetches
+bootstrap data or writes an image. The wipe only runs as PID 1; `--dry-run`
+lists what it would wipe and touches nothing.
 
 ```
 power on → PXE → controller-rendered iPXE → inspector

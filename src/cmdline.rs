@@ -22,6 +22,8 @@ pub enum BootMode {
     Clean,
 }
 
+/// The cmdline key that selects the boot mode.
+const MODE_KEY: &str = "beskar7.mode";
 /// The `beskar7.mode` value of a cleaning boot.
 const MODE_CLEAN: &str = "clean";
 
@@ -148,12 +150,16 @@ impl BootParams {
         let mut ip = None;
         let mut timeout = None;
         let mut debug = false;
-        let mut mode = BootMode::Provision;
+        let mut mode = None;
 
         for param in cmdline.split_ascii_whitespace() {
             // Split on the FIRST '=' so that base64 '=' padding in beskar7.ca is
             // preserved in the value.
             let Some((key, value)) = param.split_once('=') else {
+                // A bare `beskar7.mode` is a mode we don't know, not a provisioning run.
+                if param == MODE_KEY {
+                    mode = Some("");
+                }
                 continue;
             };
             match key {
@@ -168,11 +174,7 @@ impl BootParams {
                 "beskar7.disk" => disk = non_empty(value),
                 // The pxelinux/iPXE netboot convention (not a beskar7.* key).
                 "BOOTIF" => bootif = non_empty(value),
-                "beskar7.ip" => {
-                    if let Some(v) = non_empty(value) {
-                        ip = Some(StaticIp::parse(&v).ok_or(CmdlineError::InvalidStaticIp)?);
-                    }
-                }
+                "beskar7.ip" => ip = non_empty(value),
                 "beskar7.timeout" => {
                     if !value.is_empty() {
                         let secs: u64 = value.parse().map_err(|_| CmdlineError::InvalidTimeout)?;
@@ -180,15 +182,16 @@ impl BootParams {
                     }
                 }
                 "beskar7.debug" => debug = value.eq_ignore_ascii_case("true"),
-                "beskar7.mode" => {
-                    mode = match value {
-                        MODE_CLEAN => BootMode::Clean,
-                        _ => return Err(CmdlineError::InvalidMode),
-                    }
-                }
+                MODE_KEY => mode = Some(value),
                 _ => {}
             }
         }
+
+        let mode = match mode {
+            None => BootMode::Provision,
+            Some(MODE_CLEAN) => BootMode::Clean,
+            Some(_) => return Err(CmdlineError::InvalidMode),
+        };
 
         // A cleaning boot carries none of a claim's parameters, and ignores any it is given (§9.3).
         if mode == BootMode::Clean {
@@ -198,6 +201,9 @@ impl BootParams {
             disk = None;
             ip = None;
         }
+        let ip = ip
+            .map(|v| StaticIp::parse(&v).ok_or(CmdlineError::InvalidStaticIp))
+            .transpose()?;
 
         let mut missing = Vec::new();
         for (name, present) in [
@@ -340,6 +346,36 @@ mod tests {
     #[test]
     fn unknown_mode_is_refused() {
         let line = format!("{} beskar7.mode=erase", minimal());
+        assert!(matches!(
+            BootParams::parse(&line),
+            Err(CmdlineError::InvalidMode)
+        ));
+    }
+
+    #[test]
+    fn clean_mode_ignores_an_invalid_ip() {
+        let line = format!("{CLEAN} beskar7.ip=not-an-ip");
+        let p = BootParams::parse(&line).expect("valid");
+        assert_eq!(p.ip, None);
+    }
+
+    #[test]
+    fn a_bare_mode_is_refused() {
+        let line = format!("{} beskar7.mode", minimal());
+        assert!(matches!(
+            BootParams::parse(&line),
+            Err(CmdlineError::InvalidMode)
+        ));
+    }
+
+    #[test]
+    fn the_last_mode_wins() {
+        let line = format!("{} beskar7.mode=erase beskar7.mode=clean", minimal());
+        assert_eq!(
+            BootParams::parse(&line).expect("valid").mode,
+            BootMode::Clean
+        );
+        let line = format!("{} beskar7.mode=clean beskar7.mode=erase", minimal());
         assert!(matches!(
             BootParams::parse(&line),
             Err(CmdlineError::InvalidMode)

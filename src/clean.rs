@@ -4,14 +4,16 @@
 //! For each whole disk [`crate::target_disk::wipe_candidates`] returns, the first
 //! and last [`WIPE_EDGE_BYTES`] of the disk and of every partition on it are
 //! zeroed through one exclusive, identity-verified fd on the whole-disk node. That
-//! removes the partition table and its GPT backup, `COS_OEM` with the previous
-//! join secret, and the filesystem, RAID and LVM signatures kept at either end of
-//! a partition. It is **not** a secure erase: the data blocks in between stay.
+//! removes the partition table, its GPT backup, and the filesystem, RAID and LVM
+//! signatures kept at either end of a partition, so nothing old mounts, assembles
+//! or boots. It is **not** a secure erase: the data blocks in between, including
+//! the previous `COS_OEM` files and join secret, stay recoverable from the raw disk.
 //!
 //! The initramfs ships no `wipefs`, so the wipe is native. Every decision is a pure
-//! function ([`wipe_ranges`], [`zero_ranges`], [`partitions`], [`settle`]) tested
-//! on temp files; only [`wipe_all_disks`] touches real devices, and it refuses to
-//! run unless the process is PID 1, the initramfs `/init`.
+//! function ([`wipe_ranges`], [`zero_ranges`], [`partitions`], [`settle`],
+//! [`wipe_disks`], [`unwiped`]) tested on temp files; only [`wipe_all_disks`]
+//! touches real devices, and it refuses to run unless the process is PID 1, the
+//! initramfs `/init`.
 
 use std::fs::OpenOptions;
 use std::io::{Seek, SeekFrom, Write};
@@ -40,6 +42,8 @@ const SETTLE_STABLE_READS: u32 = 3;
 const SETTLE_MAX_READS: u32 = 15;
 /// Pause between disk listings while drivers finish probing.
 const SETTLE_INTERVAL: Duration = Duration::from_secs(1);
+/// The controller keeps at most this many characters of a `/clean-failed` reason.
+const MAX_REASON_CHARS: usize = 256;
 
 /// A byte range on a disk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,29 +72,74 @@ pub enum CleanError {
     /// One or more disks failed; the others were wiped.
     #[error("wiping failed on {}", .0.join("; "))]
     Disks(Vec<String>),
+    /// Eligible disks found after the wipe that were not wiped (late spin-up).
+    #[error("eligible disks not wiped: {}", .0.join(", "))]
+    Unwiped(Vec<String>),
+}
+
+impl CleanError {
+    /// The `/clean-failed` reason: a count and the first failure, cut to what the
+    /// controller keeps. Unlike provisioning reasons it names the disk (§4.8).
+    pub fn reason(&self) -> String {
+        let full = match self {
+            CleanError::Disks(failures) => first_of("wiping failed on", failures),
+            CleanError::Unwiped(disks) => first_of("eligible disks not wiped:", disks),
+            other => other.to_string(),
+        };
+        full.chars().take(MAX_REASON_CHARS).collect()
+    }
+}
+
+/// `"<what> <n> disk(s), first: <items[0]>"`.
+fn first_of(what: &str, items: &[String]) -> String {
+    let first = items.first().map(String::as_str).unwrap_or_default();
+    format!("{what} {} disk(s), first: {first}", items.len())
 }
 
 /// Wipe every eligible disk and return their kernel names. Refuses unless the
 /// process is PID 1, so running the binary on a workstation cannot wipe it.
 pub fn wipe_all_disks() -> Result<Vec<String>, CleanError> {
     require_init(std::process::id())?;
-    let disks = settled_candidates();
+    let disks = settle(target_disk::wipe_candidates, std::thread::sleep);
+    let block = Path::new(SYSFS_BLOCK);
+    let wiped = wipe_disks(&disks, |disk| wipe_disk(block, disk))?;
+    // A disk that came up after the settle must not be reported as cleaned (§4.7).
+    let missed = unwiped(&wiped, &target_disk::wipe_candidates());
+    if !missed.is_empty() {
+        return Err(CleanError::Unwiped(missed));
+    }
+    Ok(wiped)
+}
+
+/// Wipe each of `disks` with `wipe` and return their kernel names, or every
+/// failure. No disks is a failure, so a run never reports an empty wipe.
+pub(crate) fn wipe_disks(
+    disks: &[TargetDisk],
+    mut wipe: impl FnMut(&TargetDisk) -> Result<(), String>,
+) -> Result<Vec<String>, CleanError> {
     if disks.is_empty() {
         return Err(CleanError::NoDisks);
     }
-    let block = Path::new(SYSFS_BLOCK);
     let failures: Vec<String> = disks
         .iter()
         .filter_map(|disk| {
-            wipe_disk(block, disk)
+            wipe(disk)
                 .err()
-                .map(|e| format!("/dev/{}: {e}", disk.kname))
+                .map(|e| format!("{}: {e}", disk.dev_path()))
         })
         .collect();
     if !failures.is_empty() {
         return Err(CleanError::Disks(failures));
     }
-    Ok(disks.into_iter().map(|d| d.kname).collect())
+    Ok(disks.iter().map(|d| d.kname.clone()).collect())
+}
+
+/// The `/dev` paths of the disks in `now` that are not in `wiped`.
+pub(crate) fn unwiped(wiped: &[String], now: &[TargetDisk]) -> Vec<String> {
+    now.iter()
+        .filter(|d| !wiped.contains(&d.kname))
+        .map(TargetDisk::dev_path)
+        .collect()
 }
 
 /// Only the initramfs `/init` may wipe.
@@ -103,38 +152,24 @@ fn require_init(pid: u32) -> Result<(), CleanError> {
 }
 
 /// The disks a wipe would touch and the ranges on each, read-only (for `--dry-run`).
-pub fn plan() -> Vec<(TargetDisk, Vec<Extent>)> {
+pub fn plan() -> Vec<(TargetDisk, Result<Vec<Extent>, String>)> {
     let block = Path::new(SYSFS_BLOCK);
     target_disk::wipe_candidates()
         .into_iter()
         .map(|disk| {
-            let ranges = wipe_ranges(disk.size_bytes, &partitions(block, &disk.kname));
+            let ranges = disk_ranges(block, &disk);
             (disk, ranges)
         })
         .collect()
 }
 
-/// The wipe candidates once their listing has stopped changing, so a disk whose
-/// driver is still probing is not skipped.
-fn settled_candidates() -> Vec<TargetDisk> {
-    let names = settle(
-        || {
-            target_disk::wipe_candidates()
-                .into_iter()
-                .map(|d| d.kname)
-                .collect()
-        },
-        std::thread::sleep,
-    );
-    target_disk::wipe_candidates()
-        .into_iter()
-        .filter(|d| names.contains(&d.kname))
-        .collect()
-}
-
-/// Read `list` until it returns the same names [`SETTLE_STABLE_READS`] times in a
-/// row, or [`SETTLE_MAX_READS`] times in all, and return the last listing.
-fn settle(mut list: impl FnMut() -> Vec<String>, mut sleep: impl FnMut(Duration)) -> Vec<String> {
+/// Read `list` until it returns the same disks [`SETTLE_STABLE_READS`] times in a
+/// row, or [`SETTLE_MAX_READS`] times in all, and return the last listing, so a
+/// disk whose driver is still probing is not skipped.
+fn settle<T: PartialEq>(
+    mut list: impl FnMut() -> Vec<T>,
+    mut sleep: impl FnMut(Duration),
+) -> Vec<T> {
     let mut last = list();
     let mut stable = 1;
     for _ in 1..SETTLE_MAX_READS {
@@ -152,7 +187,7 @@ fn settle(mut list: impl FnMut() -> Vec<String>, mut sleep: impl FnMut(Duration)
 /// Zero the wipe ranges of `disk` through one exclusive, identity-verified fd,
 /// then ask the kernel to drop the partitions it no longer has.
 fn wipe_disk(block_dir: &Path, disk: &TargetDisk) -> Result<(), String> {
-    let ranges = wipe_ranges(disk.size_bytes, &partitions(block_dir, &disk.kname));
+    let ranges = disk_ranges(block_dir, disk)?;
     let path = disk.dev_path();
     // O_EXCL fails with EBUSY on a disk that is mounted or otherwise held.
     let mut file = OpenOptions::new()
@@ -171,26 +206,45 @@ fn wipe_disk(block_dir: &Path, disk: &TargetDisk) -> Result<(), String> {
     Ok(())
 }
 
+/// The wipe ranges of `disk`, or why its partitions could not be read.
+fn disk_ranges(block_dir: &Path, disk: &TargetDisk) -> Result<Vec<Extent>, String> {
+    Ok(wipe_ranges(
+        disk.size_bytes,
+        &partitions(block_dir, &disk.kname)?,
+    ))
+}
+
 /// The partitions of whole disk `kname` under a `/sys/block`-shaped `block_dir`,
-/// as byte extents. Unreadable entries are skipped.
-pub(crate) fn partitions(block_dir: &Path, kname: &str) -> Vec<Extent> {
-    let Ok(entries) = std::fs::read_dir(block_dir.join(kname)) else {
-        return Vec::new();
-    };
-    let mut parts: Vec<Extent> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|dir| dir.join("partition").exists())
-        .filter_map(|dir| {
-            let sectors = |attr: &str| read_trimmed(&dir.join(attr))?.parse::<u64>().ok();
-            Some(Extent {
-                start: sectors("start")?.checked_mul(BYTES_PER_SECTOR)?,
-                len: sectors("size")?.checked_mul(BYTES_PER_SECTOR)?,
-            })
-        })
-        .collect();
+/// as byte extents. A partition whose ends cannot be read is an error, since its
+/// ends would stay unwiped.
+pub(crate) fn partitions(block_dir: &Path, kname: &str) -> Result<Vec<Extent>, String> {
+    let entries =
+        std::fs::read_dir(block_dir.join(kname)).map_err(|e| format!("listing partitions: {e}"))?;
+    let mut parts = Vec::new();
+    for dir in entries.flatten().map(|e| e.path()) {
+        if !dir.join("partition").exists() {
+            continue;
+        }
+        let name = dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let extent = partition_extent(&dir)
+            .ok_or_else(|| format!("partition {name}: unreadable start or size"))?;
+        parts.push(extent);
+    }
     parts.sort_by_key(|p| p.start);
-    parts
+    Ok(parts)
+}
+
+/// The byte extent of one sysfs partition directory, or `None` if unreadable.
+fn partition_extent(dir: &Path) -> Option<Extent> {
+    let sectors = |attr: &str| read_trimmed(&dir.join(attr))?.parse::<u64>().ok();
+    Some(Extent {
+        start: sectors("start")?.checked_mul(BYTES_PER_SECTOR)?,
+        len: sectors("size")?.checked_mul(BYTES_PER_SECTOR)?,
+    })
 }
 
 /// The head and tail [`WIPE_EDGE_BYTES`] of the disk and of each partition,
@@ -357,12 +411,139 @@ mod tests {
         write(root, "sda/queue/rotational", "0\n"); // not a partition
 
         assert_eq!(
-            partitions(root, "sda"),
+            partitions(root, "sda").unwrap(),
             [
                 ext(2048 * 512, 1048576 * 512),
                 ext(1050624 * 512, 1044480 * 512)
             ]
         );
+    }
+
+    #[test]
+    fn a_partition_with_unreadable_ends_fails_the_disk() {
+        let s = Scratch::new("clean-bad-part");
+        let root = s.path();
+        write(root, "sda/size", "2097152\n");
+        write(root, "sda/sda1/partition", "1\n");
+        write(root, "sda/sda1/start", "2048\n");
+        write(root, "sda/sda1/size", "garbage\n");
+
+        let err = partitions(root, "sda").unwrap_err();
+        assert!(err.contains("sda1"), "{err}");
+    }
+
+    #[test]
+    fn a_disk_whose_partitions_cannot_be_listed_fails() {
+        let s = Scratch::new("clean-no-dir");
+        assert!(partitions(s.path(), "sda").is_err());
+    }
+
+    #[test]
+    fn a_disk_between_one_and_two_edges_is_zeroed_whole_once() {
+        assert_eq!(wipe_ranges(12 * MIB, &[]), [ext(0, 12 * MIB)]);
+    }
+
+    #[test]
+    fn a_partition_under_one_edge_is_zeroed_whole() {
+        // A 1 MiB BIOS-boot partition and a 1 KiB extended entry.
+        let bios_boot = ext(20 * MIB, MIB);
+        let extended = ext(40 * MIB, 1024);
+        let ranges = wipe_ranges(GIB, &[bios_boot, extended]);
+        assert_eq!(
+            ranges,
+            [
+                ext(0, 8 * MIB),
+                bios_boot,
+                extended,
+                ext(GIB - 8 * MIB, 8 * MIB),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_partition_starting_past_the_disk_end_adds_nothing() {
+        let ranges = wipe_ranges(64 * MIB, &[ext(100 * MIB, 8 * MIB)]);
+        assert_eq!(ranges, wipe_ranges(64 * MIB, &[]));
+    }
+
+    fn disk(kname: &str) -> TargetDisk {
+        TargetDisk {
+            kname: kname.into(),
+            size_bytes: GIB,
+            dev_number: "8:0".into(),
+        }
+    }
+
+    #[test]
+    fn no_disks_is_a_failure() {
+        let out = wipe_disks(&[], |d| panic!("wiped {}", d.kname));
+        assert!(matches!(out, Err(CleanError::NoDisks)));
+    }
+
+    #[test]
+    fn every_disk_is_wiped_and_named() {
+        let mut seen = Vec::new();
+        let out = wipe_disks(&[disk("sda"), disk("nvme0n1")], |d| {
+            seen.push(d.kname.clone());
+            Ok(())
+        });
+        assert_eq!(out.unwrap(), ["sda", "nvme0n1"]);
+        assert_eq!(seen, ["sda", "nvme0n1"]);
+    }
+
+    #[test]
+    fn one_failed_disk_fails_the_run_after_wiping_the_rest() {
+        let mut seen = Vec::new();
+        let out = wipe_disks(&[disk("sda"), disk("sdb"), disk("sdc")], |d| {
+            seen.push(d.kname.clone());
+            if d.kname == "sdb" {
+                return Err("open: EBUSY".into());
+            }
+            Ok(())
+        });
+        assert_eq!(
+            seen,
+            ["sda", "sdb", "sdc"],
+            "a failure must not stop the others"
+        );
+        match out {
+            Err(CleanError::Disks(failures)) => assert_eq!(failures, ["/dev/sdb: open: EBUSY"]),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_disk_that_appeared_after_the_wipe_is_unwiped() {
+        let wiped = ["sda".to_string()];
+        assert!(unwiped(&wiped, &[disk("sda")]).is_empty());
+        assert_eq!(unwiped(&wiped, &[disk("sda"), disk("sdb")]), ["/dev/sdb"]);
+    }
+
+    #[test]
+    fn the_reason_is_a_count_and_the_first_failure() {
+        let e = CleanError::Disks(vec![
+            "/dev/sda: open: EBUSY".into(),
+            "/dev/sdb: zeroing: EIO".into(),
+        ]);
+        assert_eq!(
+            e.reason(),
+            "wiping failed on 2 disk(s), first: /dev/sda: open: EBUSY"
+        );
+        let e = CleanError::Unwiped(vec!["/dev/sdc".into()]);
+        assert_eq!(
+            e.reason(),
+            "eligible disks not wiped: 1 disk(s), first: /dev/sdc"
+        );
+        assert_eq!(
+            CleanError::NoDisks.reason(),
+            "no eligible disk found to wipe"
+        );
+    }
+
+    #[test]
+    fn the_reason_fits_what_the_controller_keeps() {
+        let e = CleanError::Disks(vec![format!("/dev/sda: {}", "x".repeat(1000))]);
+        assert_eq!(e.reason().chars().count(), MAX_REASON_CHARS);
     }
 
     #[test]

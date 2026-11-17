@@ -1,4 +1,4 @@
-# Contract fixtures (vendored — contract `v4.3`)
+# Contract fixtures (vendored, contract `v4.4`)
 
 These files are **byte-copies** of the canonical wire-contract fixtures in the
 [beskar7](https://github.com/projectbeskar/beskar7) repo
@@ -8,8 +8,8 @@ pins the immutable beskar7 git tag they were taken from.
 
 | File | What it is |
 |---|---|
-| `VERSION` | the one-line contract version marker (`v4.3`); the Rust `CONTRACT_VERSION` must equal its trimmed value |
-| `CONTRACT_REF` | the pinned beskar7 tag (`contract/v4.3`) the copies were taken from — the ref the CI drift job fetches |
+| `VERSION` | the one-line contract version marker (`v4.4`); the Rust `CONTRACT_VERSION` must equal its trimmed value |
+| `CONTRACT_REF` | the pinned beskar7 tag (`contract/v4.4`) the copies were taken from, the ref the CI drift job fetches |
 | `golden_inspection_report.json` | the inspection-report POST body the inspector produces (§6) |
 | `golden_boot_cmdline.txt` | the byte-exact iPXE `/boot` render, incl. `beskar7.provider-id` (v4.2 deploy-path, §5/§9.1) |
 | `golden_provider_id_artifact.json` | descriptor of the `/oem/beskar7/provider-id` `COS_OEM` artifact the inspector writes (v4.2, §9.1 5.4) |
