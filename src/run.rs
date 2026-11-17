@@ -1,4 +1,5 @@
-//! PID 1 orchestration — the two-phase enroll/provision pipeline (contract §9).
+//! PID 1 orchestration: the two-phase enroll/provision pipeline (contract §9),
+//! or the cleaning run when booted with `beskar7.mode=clean` (v4.4 §9.3).
 //!
 //! [`run`] is the whole inspector run, composed from the already-tested modules:
 //!
@@ -27,6 +28,10 @@
 //! reboot(2)                                             deploy::reboot_now
 //! ```
 //!
+//! With `beskar7.mode=clean` (v4.4 §9.3) the run brings up the network, wipes
+//! every eligible disk ([`crate::clean`]), reports `/cleaned` or `/clean-failed`,
+//! and powers off. It never inspects, fetches bootstrap data or writes an image.
+//!
 //! ## Secret hygiene (§9)
 //! The bearer token lives in a [`Secret`](crate::secret::Secret) (redacted in
 //! `Debug`, zeroed on drop). The fetched bootstrap **user-data is the join
@@ -49,8 +54,9 @@ use std::time::Duration;
 
 use zeroize::Zeroizing;
 
+use crate::clean::{self, CleanError};
 use crate::client::{CallbackClient, ClientError};
-use crate::cmdline::{BootParams, CmdlineError};
+use crate::cmdline::{BootMode, BootParams, CmdlineError};
 use crate::deploy::{self, DeployError, OemArtifacts, Part};
 use crate::efiboot::{self, BootEntry, EfiBootError};
 use crate::esp::{self, EspError, EspPartition};
@@ -114,13 +120,17 @@ pub enum RunError {
     /// A deploy step (write/re-read/mount/inject/reboot) failed.
     #[error(transparent)]
     Deploy(#[from] DeployError),
+    /// The cleaning run could not wipe every disk.
+    #[error(transparent)]
+    Clean(#[from] CleanError),
 }
 
 /// Run the inspector. With `dry_run`, performs **Phase 1 only** (mounts are
 /// skipped, the report is submitted, and it returns `Ok` without fetching
 /// bootstrap data, writing any disk, or rebooting) — the CI / report-only mode
 /// (§9.0). Otherwise it runs both phases and, on success, **does not return** (the
-/// host reboots in [`deploy::reboot_now`]).
+/// host reboots in [`deploy::reboot_now`]). In clean mode it runs [`run_clean`]
+/// instead, which powers the host off on success.
 pub fn run(dry_run: bool) -> Result<(), RunError> {
     if !dry_run {
         mount_pseudo_filesystems()?;
@@ -157,6 +167,10 @@ pub fn run(dry_run: bool) -> Result<(), RunError> {
         if let Err(e) = net::write_resolv_conf(&net.dns) {
             eprintln!("beskar7-inspector: could not write /etc/resolv.conf: {e}");
         }
+    }
+
+    if params.mode == BootMode::Clean {
+        return run_clean(&params, dry_run);
     }
 
     // ── Phase 1: enroll & inspect (always) ──────────────────────────────────
@@ -241,6 +255,59 @@ pub fn run(dry_run: bool) -> Result<(), RunError> {
 
     eprintln!("beskar7-inspector: provisioned, rebooting into the target OS");
     Err(RunError::Deploy(deploy::reboot_now()))
+}
+
+/// The cleaning run (v4.4 §9.3): wipe every eligible disk, report, power off.
+/// With `dry_run` it only prints what it would wipe and contacts nobody.
+fn run_clean(params: &BootParams, dry_run: bool) -> Result<(), RunError> {
+    if dry_run {
+        for (disk, ranges) in clean::plan() {
+            match ranges {
+                Ok(r) => eprintln!(
+                    "beskar7-inspector: --dry-run, would wipe {} ({} ranges)",
+                    disk.dev_path(),
+                    r.len()
+                ),
+                Err(e) => eprintln!(
+                    "beskar7-inspector: --dry-run, would fail on {}: {e}",
+                    disk.dev_path()
+                ),
+            }
+        }
+        return Ok(());
+    }
+
+    let client = CallbackClient::new(params)?;
+    report_clean(
+        clean::wipe_all_disks(),
+        || client.cleaned(),
+        |reason| client.clean_failed(reason),
+    )?;
+    eprintln!("beskar7-inspector: cleaned callback accepted, powering off");
+    Err(RunError::Deploy(deploy::power_off_now()))
+}
+
+/// Report a wipe outcome: `/cleaned` only when every disk was wiped, otherwise
+/// `/clean-failed` (best effort) and the failure, which parks PID 1 (§4.7, §4.8).
+fn report_clean(
+    wiped: Result<Vec<String>, CleanError>,
+    cleaned: impl FnOnce() -> Result<(), ClientError>,
+    clean_failed: impl FnOnce(&str) -> Result<(), ClientError>,
+) -> Result<(), RunError> {
+    let e = match wiped {
+        Ok(disks) => {
+            eprintln!("beskar7-inspector: wiped {}", disks.join(", "));
+            return cleaned().map_err(RunError::from);
+        }
+        Err(e) => e,
+    };
+    eprintln!("beskar7-inspector: cleaning failed: {e}");
+    let reason = e.reason();
+    match clean_failed(&reason) {
+        Ok(()) => eprintln!("beskar7-inspector: clean-failed callback accepted ({reason})"),
+        Err(cb) => eprintln!("beskar7-inspector: clean-failed callback did not land: {cb}"),
+    }
+    Err(RunError::Clean(e))
 }
 
 /// The target disk Phase 2 deploys to, or — when selection failed — the failure,
@@ -431,7 +498,8 @@ fn esp_prepared_line(prepared: &deploy::EspPrepared, esp: &EspPartition) -> Stri
 /// from which Phase 2 step failed. The strings name the failing step only — never
 /// the image bytes, the join secret, device names or paths, or status codes — so
 /// they are safe to put on the wire and in a log (§9); the console line carries
-/// the detail. `&'static str` because the controller uses the reason for
+/// the detail. The `/clean-failed` reason differs on purpose: it names the failed
+/// disk and its errno ([`CleanError::reason`]), never a secret. `&'static str` because the controller uses the reason for
 /// operator-facing diagnosis, not machine parsing.
 fn provision_failure_reason(e: &RunError) -> &'static str {
     match e {
@@ -1039,6 +1107,66 @@ mod tests {
             size_bytes: 1 << 30,
             dev_number: "259:0".into(),
         }
+    }
+
+    // --- clean mode: /cleaned only when every disk was wiped ----------------------
+
+    #[test]
+    fn a_full_wipe_reports_cleaned_only() {
+        let cleaned = Cell::new(0u32);
+        let out = report_clean(
+            Ok(vec!["sda".into()]),
+            || {
+                cleaned.set(cleaned.get() + 1);
+                Ok(())
+            },
+            |reason| panic!("reported clean-failed {reason:?} after a full wipe"),
+        );
+        assert!(out.is_ok());
+        assert_eq!(cleaned.get(), 1);
+    }
+
+    #[test]
+    fn a_failed_wipe_reports_clean_failed_and_never_cleaned() {
+        for e in [
+            CleanError::NoDisks,
+            CleanError::Disks(vec!["/dev/sda: open: EBUSY".into()]),
+            CleanError::Unwiped(vec!["/dev/sdb".into()]),
+        ] {
+            let expected = e.reason();
+            let reported = std::cell::RefCell::new(Vec::new());
+            let out = report_clean(
+                Err(e),
+                || panic!("reported cleaned after a failed wipe"),
+                |reason| {
+                    reported.borrow_mut().push(reason.to_string());
+                    Ok(())
+                },
+            );
+            assert!(matches!(out, Err(RunError::Clean(_))));
+            assert_eq!(*reported.borrow(), vec![expected]);
+        }
+    }
+
+    #[test]
+    fn a_lost_clean_failed_callback_does_not_mask_the_failure() {
+        let out = report_clean(
+            Err(CleanError::NoDisks),
+            || panic!("reported cleaned after a failed wipe"),
+            |_| Err(ClientError::Http(404)),
+        );
+        assert!(matches!(out, Err(RunError::Clean(CleanError::NoDisks))));
+    }
+
+    #[test]
+    fn a_refused_cleaned_callback_fails_the_run() {
+        // No power-off: the run parks and the controller times the host out.
+        let out = report_clean(
+            Ok(vec!["sda".into()]),
+            || Err(ClientError::Http(401)),
+            |reason| panic!("reported clean-failed {reason:?} after a full wipe"),
+        );
+        assert!(out.is_err());
     }
 
     #[test]

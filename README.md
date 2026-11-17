@@ -65,7 +65,7 @@ docker cp $cid:/vmlinuz . && docker cp $cid:/initrd.img . && docker rm $cid
 
 Building from source is still supported — see [Build, test, lint](#build-test-lint).
 
-## How it works (contract v4.3)
+## How it works (contract v4.4)
 
 Beskar7 renders a per-host iPXE script that boots this image with the `beskar7.*`
 parameters on the kernel cmdline. The inspector then runs two phases:
@@ -111,6 +111,22 @@ parameters on the kernel cmdline. The inspector then runs two phases:
    virtual media, another disk) runs instead, and it only sees disks the
    firmware connected before starting the Shell.
 
+**Clean mode** (`beskar7.mode=clean`, v4.4): when a released host has
+`spec.cleaning.mode: Metadata`, the controller boots the inspector in clean mode
+instead. It brings up the network, waits for the disk list to settle, and zeroes
+the first and last 8 MiB of every eligible disk (the same eligibility as target
+selection: physical, non-removable, writable, not backing the ramdisk) and of
+every partition on it. That removes the partition tables, the GPT backup, and
+filesystem/RAID/LVM signatures, so nothing old mounts, assembles or boots. This
+is **not** a secure erase: the data blocks in between, including the previous
+`COS_OEM` files and join secret, stay recoverable from the raw disk. After the
+wipe it lists the disks again. If every disk was wiped it `POST`s
+`/api/v1/cleaned` and powers off. If any disk failed, none was found, or a new
+eligible disk appeared, it `POST`s `/api/v1/clean-failed` and parks, and the
+controller holds the host until the operator acts. It never inspects, fetches
+bootstrap data or writes an image. The wipe only runs as PID 1; `--dry-run`
+lists what it would wipe and touches nothing.
+
 ```
 power on → PXE → controller-rendered iPXE → inspector
               Phase 1: probe → POST report (202)
@@ -123,7 +139,7 @@ The wire contract — endpoints, cmdline parameters, the report schema, the
 digest-pinning trust model, and the disk/`COS_OEM` behavior — is specified in
 [`docs/inspector-contract.md`](https://github.com/projectbeskar/beskar7/blob/main/docs/inspector-contract.md)
 in the beskar7 repo (the **source of truth**). This repo implements contract
-**v4.3** (`CONTRACT_VERSION` in `src/lib.rs`).
+**v4.4** (`CONTRACT_VERSION` in `src/lib.rs`).
 
 ## Hardware support
 
@@ -216,8 +232,8 @@ firmware they declare, and the mountpoints it needs), and
 takes the kernel from Alpine's `linux-lts`. An operator serves these two files to
 the boot infrastructure the controller's iPXE script points at.
 
-> **Status:** the inspector is feature-complete against contract v4.3 (incl. the
-> provisioning-complete and provision-failed callbacks) and fully unit- and
+> **Status:** the inspector is feature-complete against contract v4.4 (incl. the
+> provisioning-complete and provision-failed callbacks and clean mode) and fully unit- and
 > contract-tested. `make test-vm` smoke-boots the image in QEMU (Phase 1 only —
 > without a live callback the run stops after cmdline parsing).
 > End-to-end boot (PXE → inspect → provision
@@ -233,6 +249,7 @@ src/report.rs       serde structs that serialize to the contract report schema
 src/client.rs       rustls callback client: POST report (202), GET bootstrap
 src/image.rs        digest-pinned streaming target-image fetch
 src/target_disk.rs  target-disk selection
+src/clean.rs        clean mode: zero both ends of every eligible disk and partition
 src/esp.rs          locate the EFI System Partition (GPT type GUID) on the target disk
 src/efiboot.rs      register the disk's UEFI boot entry over efivarfs (native efibootmgr)
 src/oem.rs          locate the COS_OEM partition on the target disk

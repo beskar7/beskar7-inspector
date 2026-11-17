@@ -1,11 +1,13 @@
 //! beskar7-inspector entrypoint — the initramfs `/init` (PID 1).
 //!
 //! A thin wrapper over [`beskar7_inspector::run`]: it parses the `--dry-run`
-//! flag and runs the two-phase enroll/provision pipeline (contract §9). On the
-//! production path a successful run does not return (the host reboots into the
-//! provisioned OS); on failure, since a returning PID 1 panics the kernel, this
-//! logs the (non-secret) error and parks the process so the controller's
-//! inspection/provisioning timeout re-drives the host (fresh nonce/token, §9.2).
+//! flag and runs the two-phase enroll/provision pipeline (contract §9), or the
+//! cleaning run on `beskar7.mode=clean` (v4.4 §9.3). On the production path a
+//! successful run does not return (the host reboots into the provisioned OS, or
+//! powers off after a wipe); on failure, since a returning PID 1 panics the
+//! kernel, this logs the (non-secret) error and parks the process so the
+//! controller's timeout re-drives the host (fresh nonce/token, §9.2), or holds a
+//! failed cleaning run until the operator acts.
 
 use std::time::Duration;
 
