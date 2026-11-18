@@ -133,7 +133,7 @@ jobs:
           set -euo pipefail
           docker build -t beskar7-inspector:build .
 
-      - name: Extract vmlinuz + initrd.img and checksum them
+      - name: Extract vmlinuz + initrd.img
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -141,10 +141,41 @@ jobs:
           docker cp "$cid:/vmlinuz"    dist/vmlinuz
           docker cp "$cid:/initrd.img" dist/initrd.img
           docker cp "$cid:/kernel-version.txt" dist/kernel-version.txt
+          docker cp "$cid:/kernel-source.txt" dist/kernel-source.txt
           docker rm "$cid" > /dev/null
           printf '%s\n' "${CONTRACT_VERSION}" > dist/contract-version.txt
+
+      # The kernel is GPL-2.0, so its complete corresponding source is published from
+      # the same places as the binaries: this release and the registry. It is collected
+      # here, for the exact package the build installed, because Alpine's mirrors drop a
+      # package as soon as a newer one lands.
+      - name: Collect the kernel's source and license texts
+        id: kernel
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version=//p' dist/kernel-source.txt)"
+          commit="$(sed -n 's/^aports_commit=//p' dist/kernel-source.txt)"
+          expected="${version%-r*}-${version##*-r}-lts"
+          if [ "$(cat dist/kernel-version.txt)" != "$expected" ]; then
+            echo "::error::the artifacts carry kernel $(cat dist/kernel-version.txt), but its source record names ${version}"
+            exit 1
+          fi
+          mkdir build-files
+          cp Dockerfile modules.list build-files/
+          source_tar="linux-lts-${version}-source.tar"
+          python3 -I scripts/collect-alpine-source.py "dist/${source_tar}" --extra build-files \
+            "linux-lts@${version}@${commit}"
+          tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -C licenses -cf - kernel \
+            | gzip -n > dist/kernel-licenses.tar.gz
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "source_tar=$source_tar" >> "$GITHUB_OUTPUT"
+
+      - name: Checksum the artifacts
+        run: |
+          set -euo pipefail
           cd dist
-          sha256sum vmlinuz initrd.img contract-version.txt > sha256sums.txt
+          sha256sum vmlinuz initrd.img contract-version.txt kernel-source.txt kernel-licenses.tar.gz \
+            "${{ steps.kernel.outputs.source_tar }}" > sha256sums.txt
           echo "--- artifacts ---"; ls -lh; echo; cat sha256sums.txt
 
       - name: Log in to ghcr
@@ -193,8 +224,24 @@ jobs:
           cosign sign --yes "${base}@${IMAGE_DIGEST}"
           echo "signed ${base}@${IMAGE_DIGEST}"
 
+      # The image is distributed from this registry, so the kernel's source is offered
+      # from it too.
+      - name: Push and sign the kernel source image
+        if: ${{ github.event_name == 'push' || !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          base="$(echo "${REGISTRY}/${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')"
+          tag="${base}:${{ steps.ver.outputs.version }}-source"
+          printf 'FROM scratch\nCOPY %s kernel-source.txt /\nCMD ["/source-image-is-not-runnable"]\n' \
+            "${{ steps.kernel.outputs.source_tar }}" | docker build -t "$tag" -f - dist
+          out="$(docker push "$tag")"
+          echo "$out"
+          digest="$(printf '%s\n' "$out" | sed -n 's/.*\(sha256:[0-9a-f]\{64\}\).*/\1/p' | head -1)"
+          [ -n "$digest" ] || { echo "::error::could not determine the source image digest"; exit 1; }
+          cosign sign --yes "${base}@${digest}"
+
       # These artifacts boot your hardware, so their integrity matters as much as
-      # the image's. Signing sha256sums.txt covers all three files transitively.
+      # the image's. Signing sha256sums.txt covers every file it lists transitively.
       - name: Sign the checksum manifest (keyless)
         if: ${{ github.event_name == 'push' || !inputs.dry_run }}
         run: |
@@ -243,6 +290,13 @@ jobs:
             echo "cid=\$(docker create ${base}:${ver}) && docker cp \$cid:/vmlinuz . && docker cp \$cid:/initrd.img . && docker rm \$cid"
             echo '```'
             echo
+            echo "### Source code and licenses"
+            echo
+            echo "\`vmlinuz\` and the kernel modules in \`initrd.img\` are Linux (GPL-2.0 WITH Linux-syscall-note),"
+            echo "unmodified from Alpine's \`linux-lts\` package \`${{ steps.kernel.outputs.version }}\`. Their complete corresponding"
+            echo "source is attached to this release as \`${{ steps.kernel.outputs.source_tar }}\` and published as the image"
+            echo "\`${base}:${ver}-source\`. The license texts are in \`kernel-licenses.tar.gz\`."
+            echo
             echo "### Verifying"
             echo
             echo "The image is signed (keyless/OIDC) and \`sha256sums.txt\` carries a cosign bundle:"
@@ -280,10 +334,14 @@ jobs:
             --notes-file release-notes.md \
             $prerelease \
             dist/vmlinuz dist/initrd.img dist/sha256sums.txt dist/contract-version.txt \
-            dist/sha256sums.txt.cosign.bundle
+            dist/sha256sums.txt.cosign.bundle \
+            dist/kernel-source.txt dist/kernel-licenses.tar.gz \
+            "dist/${{ steps.kernel.outputs.source_tar }}"
 
       - name: Upload artifacts (dry-run / inspection)
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: boot-artifacts-${{ steps.ver.outputs.version }}
-          path: dist/
+          path: |
+            dist/
+            !dist/*-source.tar

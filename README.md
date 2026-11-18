@@ -61,7 +61,8 @@ Images from v0.5.1 on are published under `ghcr.io/beskar7`. Images up to v0.5.0
 stay at their old path, `ghcr.io/projectbeskar/beskar7-inspector`.
 
 The image carries both files at `/vmlinuz` and `/initrd.img` (convenient for
-air-gapped mirrors):
+air-gapped mirrors). It has no base image and nothing to run, so copy the files out
+of it:
 
 ```bash
 cid=$(docker create ghcr.io/beskar7/beskar7-inspector:contract-v4.4)
@@ -185,6 +186,26 @@ hardware by this project.
 include the output of `lspci -nn` from that host. Boot any Linux live image to
 get it.
 
+### Kernel licensing
+
+`vmlinuz` and the kernel modules in `initrd.img` are the Linux kernel, taken unmodified
+from Alpine's `linux-lts` package and licensed under GPL-2.0 with the Linux syscall note.
+Each release publishes their complete corresponding source from the same places as the
+binaries:
+
+- the release asset `linux-lts-<version>-source.tar`, which holds the upstream kernel
+  source, Alpine's patches, configuration and build recipe, and the files that select
+  which modules ship;
+- the image `ghcr.io/beskar7/beskar7-inspector:<release>-source`.
+
+`kernel-source.txt` names the exact package and the Alpine commit it was built from. The
+license texts are in [`licenses/kernel/`](licenses/kernel/), and ship in the image and in
+`initrd.img` at `/licenses/kernel/` and in the release asset `kernel-licenses.tar.gz`.
+
+Releases up to v0.5.1 have the same source attached to their release pages. Their images
+also contain an Alpine userland, whose source is attached as
+`alpine-userland-<release>-source.tar`.
+
 ### Firmware licensing
 
 The firmware in `initrd.img` is not covered by this project's Apache-2.0
@@ -264,6 +285,8 @@ src/main.rs         thin PID-1 entrypoint over run::run
 tests/contract.rs   golden-fixture report round-trip (shared with beskar7)
 modules.list        the curated kernel modules the image ships
 firmware-licenses/  licence texts + WHENCE mapping for the shipped firmware
+licenses/kernel/    the kernel's license texts and where its source is published
+scripts/            collects the kernel source each release publishes
 ```
 
 ## License
@@ -272,5 +295,5 @@ Copyright 2026 The Beskar7 Authors.
 
 The inspector is licensed under the [Apache License, Version 2.0](LICENSE). The boot
 artifacts also carry third-party components under their own licenses: the Linux kernel
-and its modules (GPL-2.0), and the firmware described in
-[Firmware licensing](#firmware-licensing).
+and its modules (see [Kernel licensing](#kernel-licensing)), and the firmware described
+in [Firmware licensing](#firmware-licensing).

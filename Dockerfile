@@ -3,8 +3,9 @@
 # Build beskar7-inspector as a self-contained initramfs: one static
 # x86_64-musl binary used directly as /init, the curated kernel modules under
 # /lib/modules/<kver>/ and the firmware they request (with its licence texts)
-# under /lib/firmware/, plus the empty mountpoints it needs and a console device
-# node. No shell, no busybox, no external tools — the binary probes hardware and
+# under /lib/firmware/, the kernel's license texts under /licenses/kernel/, plus the
+# empty mountpoints it needs and a console device node. No shell, no busybox, no
+# external tools — the binary probes hardware and
 # performs every provisioning syscall natively. The output is
 # the two artifacts an operator serves to iPXE: /vmlinuz and /initrd.img.
 
@@ -44,6 +45,7 @@ WORKDIR /irfs
 COPY --from=build /src/target/x86_64-unknown-linux-musl/release/beskar7-inspector ./init
 COPY modules.list /tmp/modules.list
 COPY firmware-licenses /tmp/firmware-licenses
+COPY licenses/kernel /tmp/kernel-licenses
 # Only the mountpoints the init mounts itself, plus a console node for its
 # pre-mount stderr (the kernel wires init's stdio to /dev/console if it exists)
 # and /dev/null. devtmpfs (mounted by the init) supplies the rest.
@@ -176,17 +178,44 @@ RUN set -eu; \
     cp "$LIC"/* /irfs/lib/firmware/LICENSES/; \
     echo "=== firmware licences: $(wc -l < /tmp/fw-files) shipped files covered, $(wc -l < /tmp/fw-cited) licence texts shipped ==="; \
     ls /irfs/lib/firmware/LICENSES
+# The kernel and its modules are GPL-2.0, so ship the license texts with them, and
+# record exactly which Alpine package they came from: the digest above does not pin
+# the kernel, and the release publishes the source of this package and no other
+# (scripts/collect-alpine-source.py). A package without a recorded commit FAILS THE
+# BUILD, because its source could not be published.
+RUN set -eu; \
+    awk 'BEGIN { RS = ""; FS = "\n" } \
+         $0 ~ /(^|\n)P:linux-lts(\n|$)/ { \
+             for (i = 1; i <= NF; i++) { \
+                 if ($i ~ /^V:/) version = substr($i, 3); \
+                 if ($i ~ /^c:/) commit = substr($i, 3); \
+             } \
+         } \
+         END { \
+             if (version == "" || commit == "") exit 1; \
+             printf "package=linux-lts\nversion=%s\naports_commit=%s\n", version, commit; \
+         }' /lib/apk/db/installed > /kernel-source.txt; \
+    mkdir -p /irfs/licenses; \
+    cp -R /tmp/kernel-licenses /irfs/licenses/kernel; \
+    cp /kernel-source.txt /irfs/licenses/kernel/kernel-source.txt; \
+    cat /kernel-source.txt
 RUN find . | cpio --quiet -H newc -o | gzip -9 > /initrd.img \
  && cp /boot/vmlinuz-lts /vmlinuz \
  && ls /lib/modules | head -1 > /kernel-version.txt
 
 # ---- Stage 3: carrier image holding the two artifacts ---------------------
-FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
+# Nothing runs from this image, so it has no base: an Alpine one would redistribute
+# BusyBox and the rest of a userland nobody uses, with their source obligations.
+FROM scratch
 COPY --from=assemble /vmlinuz /vmlinuz
 COPY --from=assemble /initrd.img /initrd.img
 # The kernel these artifacts carry. An operator booting unfamiliar hardware
 # needs to know this, and the base-image tag alone does not say it.
 COPY --from=assemble /kernel-version.txt /kernel-version.txt
+# The package the kernel came from, and its license texts (also in initrd.img, at
+# /licenses/kernel/). licenses/kernel/SOURCE.txt says where its source is published.
+COPY --from=assemble /kernel-source.txt /kernel-source.txt
+COPY licenses/kernel /licenses/kernel
 # The licence texts for the firmware inside initrd.img (also shipped in it, at
 # /lib/firmware/LICENSES/), so a mirror of this image redistributes them too.
 COPY --from=assemble /irfs/lib/firmware/LICENSES/ /firmware-licenses/
@@ -196,4 +225,5 @@ LABEL org.opencontainers.image.title="beskar7-inspector" \
       org.opencontainers.image.description="Carrier image for the Beskar7 hardware-inspection initramfs (vmlinuz + initrd.img)" \
       org.opencontainers.image.source="https://github.com/beskar7/beskar7-inspector"
 # `make build` does `docker create` + `docker cp` to extract /vmlinuz + /initrd.img.
-CMD ["/bin/sh"]
+# `docker create` needs a command; there is nothing in this image to run.
+CMD ["/carrier-image-is-not-runnable"]
