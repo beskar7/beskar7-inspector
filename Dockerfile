@@ -192,6 +192,6 @@ COPY --from=assemble /kernel-version.txt /kernel-version.txt
 COPY --from=assemble /irfs/lib/firmware/LICENSES/ /firmware-licenses/
 LABEL org.opencontainers.image.title="beskar7-inspector" \
       org.opencontainers.image.description="Carrier image for the Beskar7 hardware-inspection initramfs (vmlinuz + initrd.img)" \
-      org.opencontainers.image.source="https://github.com/projectbeskar/beskar7-inspector"
+      org.opencontainers.image.source="https://github.com/beskar7/beskar7-inspector"
 # `make build` does `docker create` + `docker cp` to extract /vmlinuz + /initrd.img.
 CMD ["/bin/sh"]

@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.86"
 license = "Apache-2.0"
 description = "Hardware-inspection ramdisk for the Beskar7 Cluster API bare-metal provider"
-repository = "https://github.com/projectbeskar/beskar7-inspector"
+repository = "https://github.com/beskar7/beskar7-inspector"
 publish = false
 
 # The crate ships as a static binary used directly as the initramfs /init, but

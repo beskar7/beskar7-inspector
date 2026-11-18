@@ -106,7 +106,7 @@ jobs:
         run: |
           set -euo pipefail
           git clone --depth 1 --branch "${{ steps.pin.outputs.ref }}" \
-            https://github.com/projectbeskar/beskar7 beskar7-upstream
+            https://github.com/beskar7/beskar7 beskar7-upstream
 
       - name: Diff vendored fixtures against beskar7 (byte-exact; any delta fails)
         run: |

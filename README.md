@@ -1,7 +1,7 @@
 # beskar7-inspector
 
 The hardware-inspection and provisioning ramdisk for
-[Beskar7](https://github.com/projectbeskar/beskar7), a Cluster API infrastructure
+[Beskar7](https://github.com/beskar7/beskar7), a Cluster API infrastructure
 provider for bare-metal hosts.
 
 The inspector is a single **static Rust binary** (`x86_64-unknown-linux-musl`)
@@ -16,7 +16,7 @@ external tools — every probe and provisioning syscall is performed in-process.
 boot server serves, plus their checksums:
 
 ```bash
-REL=https://github.com/projectbeskar/beskar7-inspector/releases/latest/download
+REL=https://github.com/beskar7/beskar7-inspector/releases/latest/download
 curl -fsSLO $REL/vmlinuz
 curl -fsSLO $REL/initrd.img
 curl -fsSLO $REL/sha256sums.txt
@@ -24,10 +24,12 @@ sha256sum -c sha256sums.txt --ignore-missing
 ```
 
 These artifacts boot your hardware, so verify them before serving. Releases are
-signed with [cosign](https://docs.sigstore.dev/) keyless signing (no long-lived key):
+signed with [cosign](https://docs.sigstore.dev/) keyless signing (no long-lived key).
+Releases up to v0.5.0 were signed from the old `projectbeskar` org, so the identity
+below accepts both orgs:
 
 ```bash
-IDENTITY='^https://github.com/projectbeskar/beskar7-inspector/\.github/workflows/release\.yml@refs/tags/.*$'
+IDENTITY='^https://github\.com/(projectbeskar|beskar7)/beskar7-inspector/\.github/workflows/release\.yml@refs/tags/.*$'
 ISSUER=https://token.actions.githubusercontent.com
 
 curl -fsSLO $REL/sha256sums.txt.cosign.bundle
@@ -137,7 +139,7 @@ power on → PXE → controller-rendered iPXE → inspector
 
 The wire contract — endpoints, cmdline parameters, the report schema, the
 digest-pinning trust model, and the disk/`COS_OEM` behavior — is specified in
-[`docs/inspector-contract.md`](https://github.com/projectbeskar/beskar7/blob/main/docs/inspector-contract.md)
+[`docs/inspector-contract.md`](https://github.com/beskar7/beskar7/blob/main/docs/inspector-contract.md)
 in the beskar7 repo (the **source of truth**). This repo implements contract
 **v4.4** (`CONTRACT_VERSION` in `src/lib.rs`).
 
@@ -176,7 +178,7 @@ hardware by this project.
 
 **If your NIC or storage controller is missing,** the console shows
 `no network interface found` or `no eligible target disk found`. Please
-[open an issue](https://github.com/projectbeskar/beskar7-inspector/issues) and
+[open an issue](https://github.com/beskar7/beskar7-inspector/issues) and
 include the output of `lspci -nn` from that host. Boot any Linux live image to
 get it.
 
