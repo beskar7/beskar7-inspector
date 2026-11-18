@@ -34,7 +34,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path, PurePosixPath
 
-APORTS = "https://gitlab.alpinelinux.org/alpine/aports/-/archive"
+# Alpine's own mirror of aports. Its GitLab refuses requests from CI runners.
+APORTS = "https://codeload.github.com/alpinelinux/aports/tar.gz"
 DISTFILES = "https://distfiles.alpinelinux.org/distfiles"
 DISTFILES_BRANCHES = ["v3.24", "v3.23", "v3.22", "v3.21", "v3.20", "edge"]
 USER_AGENT = "beskar7-inspector-source-collector"
@@ -75,26 +76,25 @@ def sha512(path):
 
 def fetch_recipe(origin, commit, dest):
     """Unpack main/ or community/<origin> at commit into dest; return the repo name."""
-    for repo in ("main", "community"):
-        query = urllib.parse.urlencode({"path": f"{repo}/{origin}"})
-        data = fetch(f"{APORTS}/{commit}/aports-{commit}.tar.gz?{query}")
-        if data is None:
-            continue
-        marker = PurePosixPath(repo, origin)
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
-            for member in archive.getmembers():
-                parts = PurePosixPath(member.name).parts[1:]
-                if not member.isfile() or PurePosixPath(*parts[:2]) != marker:
-                    continue
-                relative = PurePosixPath(*parts[2:])
-                if ".." in relative.parts or relative.is_absolute():
-                    raise SystemExit(f"unsafe path in recipe archive: {member.name}")
-                target = dest / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(archive.extractfile(member).read())
-        if (dest / "APKBUILD").is_file():
-            return repo
-    raise SystemExit(f"no recipe for {origin} at aports commit {commit}")
+    data = fetch(f"{APORTS}/{commit}")
+    if data is None:
+        raise SystemExit(f"could not fetch aports at commit {commit}")
+    repo = None
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+        for member in archive:
+            parts = PurePosixPath(member.name).parts[1:]
+            if not member.isfile() or len(parts) < 3 or parts[0] not in ("main", "community") or parts[1] != origin:
+                continue
+            relative = PurePosixPath(*parts[2:])
+            if ".." in relative.parts:
+                raise SystemExit(f"unsafe path in recipe archive: {member.name}")
+            target = dest / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(archive.extractfile(member).read())
+            repo = parts[0]
+    if repo is None or not (dest / "APKBUILD").is_file():
+        raise SystemExit(f"no recipe for {origin} at aports commit {commit}")
+    return repo
 
 
 def expand(text, variables):
