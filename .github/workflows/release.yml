@@ -83,7 +83,7 @@ jobs:
           set -euo pipefail
           ref='${{ steps.contract.outputs.ref }}'
           git clone --depth 1 --branch "$ref" \
-            https://github.com/projectbeskar/beskar7 beskar7-upstream
+            https://github.com/beskar7/beskar7 beskar7-upstream
           rc=0
           for f in VERSION golden_inspection_report.json golden_boot_cmdline.txt golden_provider_id_artifact.json golden_network_data_artifact.json; do
             if diff -u "beskar7-upstream/test/contract/$f" "test/contract/$f" > "/tmp/diff-$f" 2>&1; then
@@ -182,8 +182,8 @@ jobs:
 
       # Sign by DIGEST (tags are mutable; digests are not). Keyless OIDC — no key
       # to manage. Verify with:
-      #   cosign verify ghcr.io/projectbeskar/beskar7-inspector:contract-v4.2 \
-      #     --certificate-identity-regexp '^https://github.com/projectbeskar/beskar7-inspector/\.github/workflows/release\.yml@refs/tags/.*$' \
+      #   cosign verify ghcr.io/beskar7/beskar7-inspector:contract-v4.4 \
+      #     --certificate-identity-regexp '^https://github.com/beskar7/beskar7-inspector/\.github/workflows/release\.yml@refs/tags/.*$' \
       #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
       - name: Sign image (keyless)
         if: ${{ github.event_name == 'push' || !inputs.dry_run }}

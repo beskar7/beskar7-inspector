@@ -1,7 +1,7 @@
 # Contract fixtures (vendored, contract `v4.4`)
 
 These files are **byte-copies** of the canonical wire-contract fixtures in the
-[beskar7](https://github.com/projectbeskar/beskar7) repo
+[beskar7](https://github.com/beskar7/beskar7) repo
 (`test/contract/*`, spec: `docs/inspector-contract.md`). **beskar7 is the single
 source of truth**; this inspector never edits them by hand — it vendors them and
 pins the immutable beskar7 git tag they were taken from.
