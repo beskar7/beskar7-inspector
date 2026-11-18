@@ -265,3 +265,12 @@ tests/contract.rs   golden-fixture report round-trip (shared with beskar7)
 modules.list        the curated kernel modules the image ships
 firmware-licenses/  licence texts + WHENCE mapping for the shipped firmware
 ```
+
+## License
+
+Copyright 2026 The Beskar7 Authors.
+
+The inspector is licensed under the [Apache License, Version 2.0](LICENSE). The boot
+artifacts also carry third-party components under their own licenses: the Linux kernel
+and its modules (GPL-2.0), and the firmware described in
+[Firmware licensing](#firmware-licensing).

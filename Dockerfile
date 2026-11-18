@@ -190,6 +190,8 @@ COPY --from=assemble /kernel-version.txt /kernel-version.txt
 # The licence texts for the firmware inside initrd.img (also shipped in it, at
 # /lib/firmware/LICENSES/), so a mirror of this image redistributes them too.
 COPY --from=assemble /irfs/lib/firmware/LICENSES/ /firmware-licenses/
+# The inspector's own license, so a mirror of this image redistributes it too.
+COPY LICENSE /LICENSE
 LABEL org.opencontainers.image.title="beskar7-inspector" \
       org.opencontainers.image.description="Carrier image for the Beskar7 hardware-inspection initramfs (vmlinuz + initrd.img)" \
       org.opencontainers.image.source="https://github.com/beskar7/beskar7-inspector"
