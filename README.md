@@ -54,14 +54,17 @@ container image accordingly — so you can pull the right one without guessing:
 
 ```bash
 # the contract version your controller speaks: test/contract/VERSION in the beskar7 repo
-docker pull ghcr.io/projectbeskar/beskar7-inspector:contract-v4.4
+docker pull ghcr.io/beskar7/beskar7-inspector:contract-v4.4
 ```
+
+Images from v0.5.1 on are published under `ghcr.io/beskar7`. Images up to v0.5.0
+stay at their old path, `ghcr.io/projectbeskar/beskar7-inspector`.
 
 The image carries both files at `/vmlinuz` and `/initrd.img` (convenient for
 air-gapped mirrors):
 
 ```bash
-cid=$(docker create ghcr.io/projectbeskar/beskar7-inspector:contract-v4.4)
+cid=$(docker create ghcr.io/beskar7/beskar7-inspector:contract-v4.4)
 docker cp $cid:/vmlinuz . && docker cp $cid:/initrd.img . && docker rm $cid
 ```
 
