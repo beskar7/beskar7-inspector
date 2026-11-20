@@ -1,0 +1,19 @@
+The Linux kernel in beskar7-inspector
+
+vmlinuz and the kernel modules in initrd.img are the Linux kernel, taken unmodified
+from Alpine Linux's linux-lts package. They are licensed under the GNU General Public
+License version 2 with the Linux syscall note: see COPYING and the texts in LICENSES/.
+
+kernel-source.txt, shipped with these files, names the exact package and the Alpine
+aports commit it was built from.
+
+The complete corresponding source of the kernel in each release is published with that
+release, from the same places as the binaries:
+
+  - https://github.com/beskar7/beskar7-inspector/releases/tag/<release>
+    as the release asset linux-lts-<version>-source.tar
+
+  - ghcr.io/beskar7/beskar7-inspector:<release>-source
+
+It holds the upstream kernel source, Alpine's patches, configuration and build recipe,
+and the files that select which modules the inspector ships.
