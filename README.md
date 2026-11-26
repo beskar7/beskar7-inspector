@@ -182,7 +182,7 @@ hardware by this project.
 
 **If your NIC or storage controller is missing,** the console shows
 `no network interface found` or `no eligible target disk found`. Please
-[open an issue](https://github.com/beskar7/beskar7-inspector/issues) and
+[open an issue](https://github.com/beskar7/beskar7/issues) and
 include the output of `lspci -nn` from that host. Boot any Linux live image to
 get it.
 
